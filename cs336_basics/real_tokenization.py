@@ -61,12 +61,15 @@ def find_chunk_boundaries(
 def pretokenize_complex(fname: str, special_tokens: list[str]) -> dict[str, int]:
     # Remove special tokens ahead of pretokenization
     # temporarily
-    fname = "debug.txt"
+    #fname = "debug.txt"
 
     data = open(fname).read()
     split_data = re.split("|".join(special_tokens), data)
     print("Sanitizing...")
-    sanitized_fname = f"removed_special_tokens_{fname}"
+    name_split = str(fname).split("/")
+    path_part = name_split[:-1]
+    name_part = name_split[-1]
+    sanitized_fname = "/".join(path_part + [f"removed_special_tokens_{name_part}"])
     open(sanitized_fname, "w").write("".join(split_data))
     print("Sanitized, now processing chunk boundaries")
 
@@ -80,6 +83,8 @@ def pretokenize_complex(fname: str, special_tokens: list[str]) -> dict[str, int]
         # The following is a serial implementation, but you can parallelize this
         # by sending each start/end pair to a set of processes.
         chunk_idx = 0
+        # for now, let's not bother parallelizing... forget the syntax (lolz)
+        # 
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
@@ -106,8 +111,6 @@ def apply_merge(merge: tuple[bytes, bytes], vocabulary: dict[int, bytes],  corpu
     vocabulary[new_token_id] = merge[0] + merge[1]
     #if merge[0] == bytes('n'.encode('utf-8')):
     #    import pdb; pdb.set_trace()
-
-
     new_corpus = {}
     keys_to_delete = set()
     for key in corpus:
@@ -145,17 +148,38 @@ def print_new_vocabulary(vocabulary: dict[int, bytes]):
 
 
 
-def find_merge(vocabulary: dict[int, bytes], corpus: dict[tuple[bytes], int]) -> tuple[bytes, bytes]:
+def find_merge(
+    vocabulary: dict[int, bytes], 
+    corpus: dict[tuple[bytes], int],
+    corpus_diff: dict[tuple[bytes], int]
+) -> tuple[tuple[bytes, bytes], dict[tuple[bytes], int]]:
+
+
     # Corpus is a dict from individual character bytes to int
     # ie (l, o, w): 5
     # we can use for computing byte pair frequencies
+    existing_vocab = set(vocabulary.values())
     byte_pair_freqs: dict[tuple[bytes], int] = {}
+
+    # caching optimization:
+    # only the pair counts that were changed due to merge are relevant
+    # no need to consider all other merges
+
+    if corpus_diff:
+        corpus_target = corpus_diff
+    else:
+        # Optimization
+        corpus_target = corpus
+
     for i in vocabulary:
         for j in vocabulary:
             byte_i = vocabulary[i]
             byte_j = vocabulary[j]
             byte_tuple = tuple([byte_i, byte_j])
-            for key, value in corpus.items():
+            if byte_i + byte_j in existing_vocab:
+                continue
+            
+            for key, value in corpus_target.items():
                 matches = False
                 for k in range(len(key)-1):
                     if key[k] == byte_i and key[k+1] == byte_j:
@@ -165,7 +189,10 @@ def find_merge(vocabulary: dict[int, bytes], corpus: dict[tuple[bytes], int]) ->
                         byte_pair_freqs[byte_tuple] += value
                     else:
                         byte_pair_freqs[byte_tuple] = value
-    print(byte_pair_freqs)
+
+    #print(f"Byte pair freqs: {byte_pair_freqs}")
+    if not byte_pair_freqs:
+        return None, {}
     try:
         top_val = max(byte_pair_freqs.values())
     except Exception as e:
@@ -175,10 +202,10 @@ def find_merge(vocabulary: dict[int, bytes], corpus: dict[tuple[bytes], int]) ->
     ties.sort()
     # ties broken based on lexicographically greater, so take last element
     if not ties:
-        return None
+        return None, {}
     else:
         merge_tuple = ties[-1]
-        return merge_tuple
+        return merge_tuple, byte_pair_freqs
 
 
 
@@ -216,13 +243,15 @@ def run_train_bpe(
     **kwargs, # ??
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     vocabulary: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-    cache_fname = "cached_counts.pkl"
+    cache_fname = str(input_path) + ".pkl"
     if os.path.exists(cache_fname):
+        print("Processing exists in cache! Using cache...")
         counts = pickle.loads(open(cache_fname, "rb").read())
     else:
+        print(f"Doesn't exist in cache, computing pretokenization for {input_path}...")
         counts = pretokenize_complex(input_path, special_tokens)
         open(cache_fname, "wb").write(pickle.dumps(counts))
-    import pdb; pdb.set_trace()
+    #import pdb; pdb.set_trace()
     # Freq table is raw ascii counts
     freq_table: dict[tuple[bytes], int] = {}
     for key, value in counts.items():
@@ -239,17 +268,23 @@ def run_train_bpe(
     # every merge, we add a token to the vocabulary
     # so we want to do vocab_size - len(vocabulary) merges
     num_merges = vocab_size - len(vocabulary) - len(special_tokens)
+    corpus_diff = None
     for i in range(num_merges):
         #print("=============")
-        merge = find_merge(vocabulary, corpus)
+        merge, corpus_diff = find_merge(vocabulary, corpus, corpus_diff)
+        if merge is None:
+            print("No more valid merges!")
+            break
+
         print(f"Found merge! {merge}")
         merges.append(merge)
         #print("Applying merge - vocab before:")
         print_new_vocabulary(vocabulary)
         corpus = apply_merge(merges[-1], vocabulary, corpus)
-        print("Applying merge - vocab after:")
-        print_new_vocabulary(vocabulary)
-        print(f"Corpus after: {corpus}")
+        #print("Applying merge - vocab after:")
+        #print_new_vocabulary(vocabulary)
+        #print(f"Corpus after: {corpus}")
+        print(f"Processing merge {i}/{num_merges}")
         print("=============")
 
     real_vocab_size = max(vocabulary)
