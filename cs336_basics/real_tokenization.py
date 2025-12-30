@@ -115,36 +115,20 @@ def pretokenize_complex(fname: str, special_tokens: list[str]) -> dict[str, int]
 def apply_merge(merge: tuple[bytes, bytes], vocabulary: dict[int, bytes],  corpus: dict[tuple[bytes], int]) -> dict[tuple[bytes], int]:
     # Step 1 - Add new merged tokens to the vocabulary
     new_token_id = 0 if not vocabulary else max(vocabulary) + 1
-
     vocabulary[new_token_id] = merge[0] + merge[1]
-    #if merge[0] == bytes('n'.encode('utf-8')):
-    #    import pdb; pdb.set_trace()
     new_corpus = {}
-    keys_to_delete = set()
     for key in corpus:
-        #print(f"Matching process on key: {key}, merge tokens {merge}")
-        matches = False
-        for i in range(len(key)-1):
-            # Not sure about how break affects inner loop
-            if matches:
-                continue
-            b1 = key[i]
-            b2 = key[i+1]
-            if b1 == merge[0] and b2 == merge[1]:
-                #print("Matches!")
-                matches = True
-                ls = list(key)
-                ls[i] = merge[0] + merge[1]
-                del ls[i+1]
-                new_key = tuple(ls)
-                new_corpus[new_key] = corpus[key]
-                keys_to_delete.add(key)
-
-    for key in corpus:
-        if key not in keys_to_delete:
-            new_corpus[key] = corpus[key]
-    
-    #import pdb; pdb.set_trace()
+        new_word = []
+        i = 0
+        while i < len(key):
+            if i < len(key) - 1 and key[i] == merge[0] and key[i+1] == merge[1]:
+                new_word.append(merge[0] + merge[1])
+                i += 2
+            else:
+                new_word.append(key[i])
+                i += 1
+        new_key = tuple(new_word)
+        new_corpus[new_key] = corpus[key]
     return new_corpus
 
 
