@@ -72,45 +72,64 @@ def pretokenize_complex(fname: str, special_tokens: list[str]) -> dict[str, int]
     data = open(fname).read()
     # cool, this one i literally knew but i was on the plane so couldnt lookup syntax
     # wrong: split_data = re.split("|".join(special_tokens), data)
-    split_data = re.split("|".join(re.escape(t) for t in special_tokens), data)
+
+    if special_tokens:
+        split_data = re.split("|".join(re.escape(t) for t in special_tokens), data)
+    else:
+        split_data = [data]
     print("Sanitizing...")
     name_split = str(fname).split("/")
     path_part = name_split[:-1]
     name_part = name_split[-1]
-    sanitized_fname = "/".join(path_part + [f"removed_special_tokens_{name_part}"])
-    open(sanitized_fname, "w").write("".join(split_data))
-    print("Sanitized, now processing chunk boundaries")
 
-    with open(sanitized_fname, "rb") as f:
-        num_processes = 4
-        print("Processing chunk boundaries....")
-        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-        counts = {}
-        # using tqdm might be nice...
+    fnames_to_process = []
+    for i in range(len(split_data)):
+        sanitized_fname = "/".join(path_part + [f"removed_special_tokens_{i}{name_part}"])
+        open(sanitized_fname, "w").write("".join(split_data[i]))
+        fnames_to_process.append(sanitized_fname)
+        print("Sanitized, now processing chunk boundaries")
 
-        # The following is a serial implementation, but you can parallelize this
-        # by sending each start/end pair to a set of processes.
-        chunk_idx = 0
-        # for now, let's not bother parallelizing... forget the syntax (lolz)
-        # 
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-            #print(f"Pretokenizing chunk: {chunk}")
-            #print("================================")
-            matches = re.finditer(PAT, chunk)
-            for pretoken_match in matches:
-                actual = pretoken_match.group()
-                if actual in counts:
-                    counts[actual] += 1
-                else:
-                    counts[actual] = 1
-            #print("|".join(results))
-            print(f"completed processing chunk {chunk_idx}")
-            chunk_idx += 1
-        return counts
+
+    counts_to_merge = []
+    for sanitized_fname in fnames_to_process:
+        with open(sanitized_fname, "rb") as f:
+            num_processes = 4
+            print("Processing chunk boundaries....")
+            boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+            counts = {}
+            # using tqdm might be nice...
+
+            # The following is a serial implementation, but you can parallelize this
+            # by sending each start/end pair to a set of processes.
+            chunk_idx = 0
+            # for now, let's not bother parallelizing... forget the syntax (lolz)
+            # 
+            for start, end in zip(boundaries[:-1], boundaries[1:]):
+                f.seek(start)
+                chunk = f.read(end - start).decode("utf-8", errors="ignore")
+                # Run pre-tokenization on your chunk and store the counts for each pre-token
+                PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+                #print(f"Pretokenizing chunk: {chunk}")
+                #print("================================")
+                matches = re.finditer(PAT, chunk)
+                for pretoken_match in matches:
+                    actual = pretoken_match.group()
+                    if actual in counts:
+                        counts[actual] += 1
+                    else:
+                        counts[actual] = 1
+                print(f"completed processing chunk {chunk_idx}")
+                chunk_idx += 1
+            counts_to_merge.append(counts)
+    final_counts = {}
+    for count in counts_to_merge:
+        for key in count:
+            if key not in final_counts:
+                final_counts[key] = count[key]
+            else:
+                final_counts[key] += count[key]
+    return final_counts
+
 
 def apply_merge(merge: tuple[bytes, bytes], vocabulary: dict[int, bytes],  corpus: dict[tuple[bytes], int]) -> dict[tuple[bytes], int]:
     # Step 1 - Add new merged tokens to the vocabulary
@@ -264,14 +283,7 @@ def run_train_bpe(
     **kwargs, # ??
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     vocabulary: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-    cache_fname = str(input_path) + ".pkl2"
-    if os.path.exists(cache_fname):
-        print("Processing exists in cache! Using cache...")
-        counts = pickle.loads(open(cache_fname, "rb").read())
-    else:
-        print(f"Doesn't exist in cache, computing pretokenization for {input_path}...")
-        counts = pretokenize_complex(input_path, special_tokens)
-        open(cache_fname, "wb").write(pickle.dumps(counts))
+    counts = pretokenize_complex(input_path, special_tokens)
     #import pdb; pdb.set_trace()
     # Freq table is raw ascii counts
     freq_table: dict[tuple[bytes], int] = {}
