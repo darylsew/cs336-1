@@ -591,4 +591,5 @@ def run_train_bpe(
     """
 
     from cs336_basics import real_tokenization
-    real_tokenization.run_train_bpe(input_path, vocab_size, special_tokens, **kwargs)
+    vocab, merges = real_tokenization.run_train_bpe(input_path, vocab_size, special_tokens, **kwargs)
+    return vocab, merges

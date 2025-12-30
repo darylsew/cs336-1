@@ -5,6 +5,7 @@ import copy
 import pdb
 import pickle
 
+DEBUG = False
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -58,13 +59,20 @@ def find_chunk_boundaries(
 
 #with open("../data/TinyStoriesV2-GPT4-valid.txt", "rb") as f:
 
+# Daryl's reflection on errors:
+# - Overcomplicating things - should take a step back if something is too hard
+# - Not tracking where we are spending most of our time - should formally profile
+#   before spending any time optimizing things 
+
 def pretokenize_complex(fname: str, special_tokens: list[str]) -> dict[str, int]:
     # Remove special tokens ahead of pretokenization
     # temporarily
     #fname = "debug.txt"
 
     data = open(fname).read()
-    split_data = re.split("|".join(special_tokens), data)
+    # cool, this one i literally knew but i was on the plane so couldnt lookup syntax
+    # wrong: split_data = re.split("|".join(special_tokens), data)
+    split_data = re.split("|".join(re.escape(t) for t in special_tokens), data)
     print("Sanitizing...")
     name_split = str(fname).split("/")
     path_part = name_split[:-1]
@@ -149,10 +157,38 @@ def print_new_vocabulary(vocabulary: dict[int, bytes]):
 
 
 def find_merge(
-    vocabulary: dict[int, bytes], 
     corpus: dict[tuple[bytes], int],
-    corpus_diff: dict[tuple[bytes], int]
 ) -> tuple[tuple[bytes, bytes], dict[tuple[bytes], int]]:
+    """
+      Input: corpus (dict of word tuples → counts)
+    Output: best pair to merge (or None if nothing left)
+
+    Algorithm:
+    1. For each word in corpus:
+        For each adjacent pair in word:
+            Add word's count to that pair's total
+    2. Find pair with highest count (break ties lexicographically with max)
+    3. Return that pair
+    """
+    byte_pair_freqs: dict[tuple[bytes], int] = {}
+    for word in corpus:
+        for i in range(len(word)-1):
+            b0 = word[i]
+            b1 = word[i+1]
+            b_pair = tuple([b0, b1])
+            if b_pair in byte_pair_freqs:
+                byte_pair_freqs[b_pair] += corpus[word]
+            else:
+                byte_pair_freqs[b_pair] = corpus[word]
+    if not byte_pair_freqs:
+        print("No byte pair freqs computed")
+        return None
+    top_val = max(byte_pair_freqs.values())
+    ties = [key for key in byte_pair_freqs if byte_pair_freqs[key] == top_val]
+    ties.sort()
+    return ties[-1]
+
+    """
 
 
     # Corpus is a dict from individual character bytes to int
@@ -206,6 +242,7 @@ def find_merge(
     else:
         merge_tuple = ties[-1]
         return merge_tuple, byte_pair_freqs
+    """
 
 
 
@@ -243,7 +280,7 @@ def run_train_bpe(
     **kwargs, # ??
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     vocabulary: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-    cache_fname = str(input_path) + ".pkl"
+    cache_fname = str(input_path) + ".pkl2"
     if os.path.exists(cache_fname):
         print("Processing exists in cache! Using cache...")
         counts = pickle.loads(open(cache_fname, "rb").read())
@@ -268,29 +305,32 @@ def run_train_bpe(
     # every merge, we add a token to the vocabulary
     # so we want to do vocab_size - len(vocabulary) merges
     num_merges = vocab_size - len(vocabulary) - len(special_tokens)
-    corpus_diff = None
     for i in range(num_merges):
         #print("=============")
-        merge, corpus_diff = find_merge(vocabulary, corpus, corpus_diff)
-        if merge is None:
+        merge = find_merge(corpus)
+        if merge is None or merge in vocabulary:
             print("No more valid merges!")
             break
 
-        print(f"Found merge! {merge}")
+        if DEBUG:
+            print(f"Found merge! {merge}")
         merges.append(merge)
-        #print("Applying merge - vocab before:")
-        print_new_vocabulary(vocabulary)
+        if DEBUG:
+            print("Applying merge - vocab before:")
+            print_new_vocabulary(vocabulary)
         corpus = apply_merge(merges[-1], vocabulary, corpus)
-        #print("Applying merge - vocab after:")
-        #print_new_vocabulary(vocabulary)
-        #print(f"Corpus after: {corpus}")
-        print(f"Processing merge {i}/{num_merges}")
-        print("=============")
+        if DEBUG:
+            print("Applying merge - vocab after:")
+            print_new_vocabulary(vocabulary)
+            print(f"Corpus after: {corpus}")
+            print(f"Processing merge {i+1}/{num_merges}")
+            print("=============")
 
-    real_vocab_size = max(vocabulary)
+    real_vocab_size = max(vocabulary) + 1 # off by one because 0 is a key
     for i in range(real_vocab_size, real_vocab_size + len(special_tokens)):
         idx = i - real_vocab_size
-        vocabulary[i+1] = special_tokens[idx]
+        vocabulary[i] = special_tokens[idx].encode("utf-8")
+    #import pdb; pdb.set_trace()
     assert len(vocabulary) == real_vocab_size + len(special_tokens)
     assert len(vocabulary) == vocab_size
     assert len(merges) == num_merges
